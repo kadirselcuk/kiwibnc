@@ -285,6 +285,13 @@ commands['376'] = async function(msg, con) {
 // ERR_NOMOTD
 commands['422'] = commands['376'];
 
+// ERR_YOUREBANNEDCREEP
+commands['465'] = async function(msg, con) {
+    // Don't auto reconnect on AKILL
+    con.state.tempSet('requested_close', true);
+    return true;
+};
+
 // keep track of login/logout to forward lines to new clients
 commands['900'] = async function(msg, con) {
     let account = msg.params[2];
@@ -354,7 +361,7 @@ commands.PART = async function(msg, con) {
         chan.partReceived = false;
         chan.leave();
     }
-    
+
     await con.state.save();
 };
 
@@ -474,9 +481,12 @@ commands.NOTICE = async function(msg, con) {
     if (con.state.logging && con.state.netRegistered) {
         await con.messages.storeMessage(msg, con, null);
     }
-
-    // Make sure we have this buffer
-    con.state.getOrAddBuffer(bufferNameIfPm(msg, con.state.nick, 0), con);
+    const bufferName = bufferNameIfPm(msg, con.state.nick, 0);
+    // Some notices come from the server without a nick, don't create an empty buffername for these
+    if (bufferName) {
+        // Make sure we have this buffer
+        con.state.getOrAddBuffer(bufferName, con);
+    }
 };
 
 commands.ERROR = async function(msg, con) {

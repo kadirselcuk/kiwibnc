@@ -89,8 +89,8 @@ commandHooks.addBuiltInHooks = function addBuiltInHooks() {
         let caps = event.client.state.caps;
         let m = event.message;
         if (!caps.has('extended-join') && m.command === 'JOIN' && m.params.length > 2) {
-            // Drop the account name from the params (The * in the above example)
-            m.params.splice(1, 1);
+            // Drop the account name (The * in the above example) and realname from the params 
+            m.params.splice(1, 2);
         }
     });
 
@@ -162,7 +162,7 @@ commandHooks.addBuiltInHooks = function addBuiltInHooks() {
                 // Only keep the first prefix for each user from the userlist
                 let list = m.params[3].split(' ').map(item => {
                     let parts = splitPrefixAndNick(prefixes, item);
-                    return parts.prefixes[0] + parts.nick;
+                    return (parts.prefixes[0] || '') + parts.nick;
                 });
 
                 m.params[3] = list.join(' ');
@@ -217,10 +217,10 @@ commandHooks.addBuiltInHooks = function addBuiltInHooks() {
                 let pos = mask.indexOf('!');
                 if (pos === -1) {
                     // No username separator, so it's safely just the nick
-                    return mask;
+                    return parts.prefixes + mask;
                 }
 
-                return mask.substring(0, pos)
+                return parts.prefixes + mask.substring(0, pos)
             });
 
             m.params[3] = list.join(' ');
