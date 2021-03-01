@@ -2,6 +2,7 @@ const net = require('net');
 const tls = require('tls');
 const { EventEmitter } = require('events');
 const uuidv4 = require('uuid/v4');
+const Throttler = require('../libs/throttler');
 
 module.exports = class SocketConnection extends EventEmitter {
     constructor(conId, queue, sock) {
@@ -15,6 +16,7 @@ module.exports = class SocketConnection extends EventEmitter {
         this.connectedEvent = 'connect';
         this.connected = false;
         this.connecting = false;
+        this.throttledWrite = new Throttler(0, this.forceWrite.bind(this));
 
         if (sock) {
             this.sock = sock;
@@ -24,25 +26,27 @@ module.exports = class SocketConnection extends EventEmitter {
     }
 
     socketLifecycle(tlsOpts) {
-        let lastError;
+        let lastError = null;
 
         let completeConnection = () => {
             this.connected = true;
             this.connecting = false;
+            lastError = null;
             this.sock.setEncoding('utf8');
             this.queue.sendToWorker('connection.open', {id: this.id});
             this.buffer.forEach((data)=> {
-                this.forceWrite(data);
+                this.throttledWrite(data);
             });
         };
 
-        let onClose = (withError) => {
+        let onClose = () => {
             l.debug(`[end ${this.id}]`);
             this.connected = false;
             this.queue.sendToWorker('connection.close', {
                 id: this.id,
-                error: withError && lastError ? lastError.toString() : null,
+                error: lastError ? lastError.toString() : null,
             });
+            this.throttledWrite.stop();
             this.emit('dispose');
         };
         let onError = (err) => {
@@ -60,25 +64,37 @@ module.exports = class SocketConnection extends EventEmitter {
             }
     
             lines.forEach((line) => {
-                l.debug(`[in  ${this.id}]`, [line.trimEnd()]);
+                l.debug(`[in ${this.id}]`, [line.trimEnd()]);
                 this.queue.sendToWorker('connection.data', {id: this.id, data: line.trimEnd()});
             });            
+        };
+        let onTimeout = () => {
+            l.debug(`[timeout ${this.id}]`);
+            lastError = new Error('Connection timeout');
+            this.sock.destroy();
         };
 
         let bindEvents = () => {
             this.sock.on('close', onClose);
             this.sock.on('error', onError);
             this.sock.on('data', onData);
+            this.sock.on('timeout', onTimeout);
         };
         let unbindEvents = () => {
             this.sock.off('close', onClose);
             this.sock.off('error', onError);
             this.sock.off('data', onData);
+            this.sock.off('timeout', onTimeout);
         };
 
         // Bind the socket events before we connect so that we catch any end/close events
         bindEvents();
         this.sock.once('connect', () => {
+            // We only use the timeout to determine connection timeouts so stop handling that now
+            this.sock.off('timeout', onTimeout);
+
+            // If we don't need any TLS handshakes, then this connection is done and
+            // we are ready to go
             if (!tlsOpts) {
                 completeConnection();
                 return;
@@ -118,19 +134,25 @@ module.exports = class SocketConnection extends EventEmitter {
             family: opts.family || undefined,
         };
 
+        sock.setTimeout(opts.connectTimeout || 5000);
         sock.connect(connectOpts);
         this.socketLifecycle(useTls ? { servername: opts.servername, tlsverify: opts.tlsverify } : null);
     }
 
     close() {
-        this.sock.end();
+        // Close after any outstanding writes have finished
+        this.throttledWrite.queueFn(() => {
+            if (this.sock) {
+                this.sock.end();
+            }
+        });
     }
 
     write(data) {
         if (!this.connected) {
             this.buffer.push(data);
         } else {
-            this.forceWrite(data);
+            this.throttledWrite(data);
         }
     }
 

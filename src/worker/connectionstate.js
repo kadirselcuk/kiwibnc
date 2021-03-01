@@ -1,5 +1,15 @@
 const Helpers = require('../libs/helpers');
 
+class IrcUser {
+    constructor(nick) {
+        this.nick = nick || '';
+        this.host = '';
+        this.username = '';
+        this.prefixes = '';
+        this.tags = Object.create(null);
+    }
+}
+
 class IrcBuffer {
     constructor(name, upstreamCon) {
         this.name = name;
@@ -10,6 +20,36 @@ class IrcBuffer {
             upstreamCon.isChannelName(name) :
             true;
         this.lastSeen = 0;
+        this.users = Object.create(null);
+    }
+
+    leave() {
+        this.joined = false;
+        this.users = Object.create(null);
+    }
+
+    addUser(nick, user={}) {
+        let o = this.users[nick.toLowerCase()] || new IrcUser(nick);
+        this.users[nick.toLowerCase()] = o;
+
+        let addProp = (prop) => {
+            if (typeof user[prop] !== 'undefined') {
+                o[prop] = user[prop];
+            }
+        };
+
+        o.nick = nick;
+        addProp('host');
+        addProp('username');
+        addProp('prefixes');
+
+        if (user.tags) {
+            Object.assign(o.tags, user.tags);
+        }
+    }
+
+    removeUser(nick) {
+        delete this.users[nick.toLowerCase()];
     }
 
     static fromObj(obj) {
@@ -18,6 +58,8 @@ class IrcBuffer {
         c.joined = obj.joined || false;
         c.topic = obj.topic || '';
         c.isChannel = !!obj.isChannel;
+        c.lastSeen = obj.lastSeen || 0;
+        c.users = obj.users || [];
         return c;
     }
 }
@@ -88,6 +130,9 @@ class ConnectionState {
             tlsverify: this.tlsverify,
             type: this.type,
             account: this.account,
+            username: this.username,
+            realname: this.realname,
+            password: this.password,
             connected: this.connected,
             sasl: JSON.stringify(this.sasl),
             server_prefix: this.serverPrefix,
@@ -145,6 +190,10 @@ class ConnectionState {
             if (!this.connected) {
                 this.nick = net.nick;
             }
+
+            this.username = net.username || 'kiwibnc';
+            this.realname = net.realname || 'kiwibnc';
+            this.password = net.password || '';
         } else {
             // This network wasn't found in the database. Maybe it was deleted
             this.bindHost = '';
@@ -158,6 +207,10 @@ class ConnectionState {
             if (!this.connected) {
                 this.nick = '';
             }
+
+            this.username = '';
+            this.realname = '';
+            this.password = '';
         }
     }
     async load() {
@@ -190,6 +243,9 @@ class ConnectionState {
             }
             this.nick = row.nick;
             this.account = row.account;
+            this.username = row.username;
+            this.realname = row.realname;
+            this.password = row.password;
             this.receivedMotd = row.received_motd;
             this.netRegistered = row.net_registered;
             this.authUserId = row.auth_user_id;
@@ -233,6 +289,11 @@ class ConnectionState {
     }
 
     getOrAddBuffer(name, upstreamCon) {
+        if (name.indexOf('.') > -1) {
+            // Route server messages to the server buffer
+            name = '*';
+        }
+
         let buffer = this.getBuffer(name);
         if (buffer) {
             return buffer;
@@ -245,14 +306,21 @@ class ConnectionState {
     }
 
     getBuffer(name) {
+        if (name.indexOf('.') > -1) {
+            // Route server messages to the server buffer
+            name = '*';
+        }
+
         return this.buffers[name.toLowerCase()];
     }
 
     addBuffer(chan, upstreamCon) {
         let buffer = null;
         if (typeof chan === 'string') {
+            l.debug(`Adding buffer '${chan}'`);
             buffer = new IrcBuffer(chan, upstreamCon);
         } else {
+            l.debug(`Adding buffer '${chan.name}'`);
             buffer = IrcBuffer.fromObj(chan);
         }
 
@@ -261,10 +329,12 @@ class ConnectionState {
     }
 
     delBuffer(name) {
+        l.debug(`Removing buffer '${name}'`);
         delete this.buffers[name.toLowerCase()];
     }
 
     renameBuffer(oldName, newName) {
+        l.debug(`Renaming buffer '${oldName}' => '${newName}'`);
         let oldBuffer = this.getBuffer(oldName);
         if (!oldBuffer){
             return;

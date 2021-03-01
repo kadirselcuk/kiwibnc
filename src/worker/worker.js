@@ -1,9 +1,10 @@
-const path = require('path');
+const fs = require('fs');
 const uuidv4 = require('uuid/v4');
 const { ircLineParser } = require('irc-framework');
 const Koa = require('koa');
 const koaStatic = require('koa-static');
-const KoaRouter = require('koa-router');
+const KoaRouter = require('@koa/router');
+const KoaMount = require('koa-mount');
 const koaBody = require('koa-body');
 const Database = require('../libs/database');
 const Crypt = require('../libs/crypt');
@@ -17,6 +18,7 @@ const { parseBindString } = require('../libs/helpers');
 
 async function run() {
     let app = await require('../libs/bootstrap')('worker', {type: 'worker'});
+    global.config = app.conf;
 
     let cryptKey = app.conf.get('database.crypt_key', '');
     if (cryptKey.length !== 32) {
@@ -65,8 +67,8 @@ async function initExtensions(app) {
     extensions.forEach(async extName => {
         try {
             let extPath = (extName[0] === '.' || extName[0] === '/') ?
-                path.join(app.conf.baseDir, extName) :
-                `./extensions/${extName}/`;
+                app.conf.relativePath(extName) :
+                `../extensions/${extName}/`;
 
             l.info('Loading extension ' + extPath);
             let ext = require(extPath);
@@ -276,23 +278,37 @@ async function loadConnections(app) {
 }
 
 async function initWebserver(app) {
+    let basePath = app.conf.get('webserver.base_path', '/')
+        .replace(/\/$/, ''); // strip trailing slashes
+    if (basePath && basePath[0] !== '/') {
+        // Base path must always be absolute
+        basePath = '/' + basePath;
+    }
+
     app.webserver = new Koa();
+    app.webserver.context.basePath = basePath;
+
+	let router = app.webserver.router = new KoaRouter({
+        prefix: basePath, 
+    });
 
     app.webserver.use(koaBody({ multipart: true }));
-
-	let router = app.webserver.router = new KoaRouter();
-	app.webserver.use(router.routes());
+    app.webserver.use(router.routes());
     app.webserver.use(router.allowedMethods());
 
-    app.webserver.use(koaStatic(app.conf.relativePath(app.conf.get('webserver.public_dir', './public_http'))));
+    let staticServ = koaStatic(app.conf.relativePath(app.conf.get('webserver.public_dir', './public_http')));
+    app.webserver.use(KoaMount(basePath || '/', staticServ));
 
-    let bindMatch = app.conf.get('webserver.bind', '8080').match(/(?:(.+):)?([0-9]+)/);
-    let host = bindMatch[1] || '0.0.0.0';
-    let port = bindMatch[2] ? parseInt(bindMatch[2], 10) : 8080;
+    let sockPath = app.conf.get('webserver.bind_socket', '/tmp/kiwibnc_httpd.sock');
+    if (app.conf.get('webserver.enabled') && sockPath) {  
+        try {
+            // Make sure the socket doesn't already exist
+            fs.unlinkSync(sockPath);
+        } catch (err) {
+        }
 
-    if (app.conf.get('webserver.enabled')) {
-        l.debug(`Webserver listening on http://${host}:${port}`);
-        app.webserver.listen(port);
+        app.webserver.listen(sockPath);
+        l.debug(`Webserver running`);
     }
 }
 

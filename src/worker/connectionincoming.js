@@ -37,21 +37,25 @@ class ConnectionIncoming {
     get upstream() {
         // Not logged in = no upstream connection possible
         if (!this.state.authUserId) {
+            l.trace('upstream() no authUserId');
             return null;
         }
 
         // Not authed into a network = user mode only
         if (!this.state.authNetworkId) {
+            l.trace('upstream() no authNetworkId');
             return null;
         }
 
         if (this.cachedUpstreamId) {
             let con = this.conDict.get(this.cachedUpstreamId);
             if (con) {
+                l.trace('upstream() Found cached upstream');
                 return con;
             }
 
             // this.conDict may no longer contain cachedUpstreamId if that con was disconnected
+            l.trace('upstream() Clearing cached upstream');
             this.cachedUpstreamId = false;
         }
 
@@ -59,8 +63,11 @@ class ConnectionIncoming {
 
         // If we found an upstream, add this incoming connection to it
         if (upstream) {
+            l.trace('upstream() Found upstream, caching');
             this.cachedUpstreamId = upstream.id;
             upstream.state.linkIncomingConnection(this.id);
+        } else {
+            l.trace('upstream() Upstream not found');
         }
 
         return upstream;
@@ -275,6 +282,56 @@ class ConnectionIncoming {
                 await this.writeMsg(msg);
             });
         }
+    }
+
+    sendNames(buffer) {
+        let upstream = this.upstream;
+        if (!upstream) {
+            return;
+        }
+
+        let fullMask = this.state.caps.has('userhost-in-names');
+        let multiPrefix = this.state.caps.has('multi-prefix');
+    
+        let names = [];
+        for (let n in buffer.users) {
+            let user = buffer.users[n];
+            let mask = (fullMask && user.host) ?
+                `${user.nick}!${user.username}@${user.host}` :
+                user.nick;
+            let prefix = multiPrefix ?
+                user.prefixes :
+                user.prefixes[0] || '';
+    
+            names.push(prefix + mask);
+        }
+
+        // NAMES replies include all the users on the same line. But if it goes over the 512 line
+        // limit then we need to break it up into chunks
+
+        let currentLine = '';
+        // TODO: Correctly track the channel status (@ = etc)
+        // :irc.network.org 353 Guest25 @ #channel :@Guest25
+        let args = ['353', this.state.nick, '=', buffer.name];
+        let len = args.reduce((prevVal, curVal) => prevVal + curVal.length, 0);
+        len += 2 + upstream.state.serverPrefix.length; // 2 = the : before and space after
+        len += args.length; // the spaces between the args
+        while (names.length > 0) {
+            let currentName = names.shift();
+            if (len + currentLine.length + 1 + currentName.length > 512) {
+                this.writeMsgFrom(upstream.state.serverPrefix, ...args.concat(currentLine));
+                currentLine = '';
+                continue;
+            }
+
+            currentLine += ' ' + currentName;
+        }
+
+        if (currentLine) {
+            this.writeMsgFrom(upstream.state.serverPrefix, ...args.concat(currentLine));
+        }
+
+        this.writeMsgFrom(upstream.state.serverPrefix, '366', this.state.nick, buffer.name, 'End of /NAMES list.');
     }
 
     // Handy helper to reach the hotReloadClientCommands() function

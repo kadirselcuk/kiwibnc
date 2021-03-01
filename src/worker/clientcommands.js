@@ -1,5 +1,6 @@
 const { ircLineParser, Message } = require('irc-framework');
-const { mParam, mParamU } = require('../libs/helpers');
+const { mParam, mParamU, cloneIrcMessage } = require('../libs/helpers');
+const msgIdGenerator = require('../libs/msgIdGenerator');
 const ClientControl = require('./clientcontrol');
 const hooks = require('./hooks');
 
@@ -7,7 +8,7 @@ let commands = Object.create(null);
 
 module.exports.run = async function run(msg, con) {
     let command = msg.command.toUpperCase();
-    l.debug('run() state:', [command, con.state.netRegistered, con.state.tempGet('capping'), con.state.tempGet('reg.state'), msg.source]);
+    l.debug('run() state:', [command, con.state.netRegistered, con.state.tempGet('capping'), con.state.tempGet('reg.state'), msg.source, con.state.nick]);
     if (command === 'DEB' || command === 'RELOAD' || command === 'PING') {
         return await runCommand(command, msg, con);
     }
@@ -149,6 +150,14 @@ async function maybeProcessRegistration(con) {
 
     await con.state.save();
 
+    // If after all the authing above we had a network name but couldn't find a network instance
+    // to attach to, fail here
+    if (networkName && !network) {
+        await con.writeMsg('ERROR', 'Network not found');
+        con.close();
+        return false;
+    }
+
     // If CAP is in negotiation phase, that will start the upstream when ready
     if (con.state.tempGet('capping')) {
         return;
@@ -242,24 +251,35 @@ commands.USER = async function(msg, con) {
 };
 
 commands.NOTICE = async function(msg, con) {
+    let msgId = msgIdGenerator.generateId();
+
     // Send this message to other connected clients
     con.upstream && con.upstream.forEachClient((client) => {
         let m = new Message('NOTICE', msg.params[0], msg.params[1]);
         m.prefix = con.upstream.state.nick;
+        m.tags.msgid = msgId;
         m.source = 'client';
         client.writeMsg(m);
     }, con);
 
     if (con.upstream && con.upstream.state.logging && con.upstream.state.netRegistered) {
-        await con.messages.storeMessage(msg, con.upstream, con);
+        // Add a msgid tag to the message before it's stored. We don't add it to the original
+        // message because we don't want it being sent upstream.
+        // TODO: If labeled-response+msgid+echo-message is enabled upstream, dont store the message
+        let m = cloneIrcMessage(msg);
+        m.tags.msgid = msgId;
+        await con.messages.storeMessage(m, con.upstream, con);
     }
 };
 
 commands.PRIVMSG = async function(msg, con) {
+    let msgId = msgIdGenerator.generateId();
+
     // Send this message to other connected clients
     con.upstream && con.upstream.forEachClient((client) => {
         let m = new Message('PRIVMSG', msg.params[0], msg.params[1]);
         m.prefix = con.upstream.state.nick;
+        m.tags.msgid = msgId;
         m.source = 'client';
         client.writeMsg(m);
     }, con);
@@ -271,7 +291,12 @@ commands.PRIVMSG = async function(msg, con) {
     }
 
     if (con.upstream && con.upstream.state.logging && con.upstream.state.netRegistered) {
-        await con.messages.storeMessage(msg, con.upstream, con);
+        // Add a msgid tag to the message before it's stored. We don't add it to the original
+        // message because we don't want it being sent upstream.
+        // TODO: If labeled-response+msgid+echo-message is enabled upstream, dont store the message
+        let m = cloneIrcMessage(msg);
+        m.tags.msgid = msgId;
+        await con.messages.storeMessage(m, con.upstream, con);
     }
 
     return true;
@@ -309,6 +334,25 @@ commands.NICK = async function(msg, con) {
     return true;
 };
 
+commands.NAMES = async function(msg, con) {
+    let bufferName = msg.params[0];
+    let upstream = con.upstream;
+
+    if (!con.upstream || !con.upstream.state.netRegistered) {
+        con.writeFromBnc('366', con.state.nick, bufferName, 'End of /NAMES list.');
+        return false;
+    }
+
+    let buffer = upstream.state.getBuffer(bufferName);
+    if (!buffer) {
+        con.writeFromBnc('366', upstream.state.nick, bufferName, 'End of /NAMES list.');
+        return false;
+    }
+
+    con.sendNames(buffer);
+    return false;
+};
+
 commands.PING = async function(msg, con) {
     con.writeMsg('PONG', msg.params[0]);
     return false;
@@ -325,6 +369,7 @@ commands.DEB = async function(msg, con) {
     l.info('clients', con.upstream ? con.upstream.state.linkedIncomingConIds.size : '<no upstream>');
     l.info('this client registered?', con.state.netRegistered);
     l.info('tmp vars', con.state.tempData);
+    l.info('buffers', con.upstream ? con.upstream.state.buffers : '<no upstream>');
 
     if (Object.keys(con.state.buffers).length === 0) {
         l.info('No buffers');

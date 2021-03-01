@@ -1,4 +1,4 @@
-const { mParam, mParamU } = require('../libs/helpers');
+const { mParam, mParamU, parseMask } = require('../libs/helpers');
 const hooks = require('./hooks');
 
 let commands = Object.create(null);
@@ -25,6 +25,7 @@ commands['CAP'] = async function(msg, con) {
         'away-notify',
         'account-notify',
         'account-tag',
+        'invite-notify',
         'extended-join',
         'userhost-in-names',
         'cap-notify',
@@ -155,7 +156,7 @@ commands['CAP'] = async function(msg, con) {
 
         //TODO: Handle case of sasl defined but no ack given for it.
         // probably an option to either continue on no/bad sasl auth or abort connection.
-        if (acks.includes('sasl') && con.state.sasl.account) {
+        if (acks.includes('sasl') && con.state.sasl.account && con.state.sasl.password) {
             con.writeLine('AUTHENTICATE PLAIN');
         } else if (!con.state.receivedMotd) {
             con.writeLine('CAP', 'END');
@@ -169,7 +170,7 @@ commands['AUTHENTICATE'] = async function(msg, con) {
     if (mParamU(msg, 0, '') === '+') {
         let sasl = con.state.sasl;
         let authStr = `${sasl.account}\0${sasl.account}\0${sasl.password}`;
-        let b = new Buffer(authStr, 'utf8');
+        let b = new Buffer.from(authStr, 'utf8');
         let b64 = b.toString('base64');
 
         while (b64.length >= 400) {
@@ -197,6 +198,7 @@ commands['903'] = async function(msg, con) {
 // :server 904 <nick> :SASL authentication failed
 commands['904'] = async function(msg, con) {
     if (!con.state.netRegistered) {
+        await con.state.tempSet('irc_error','Invalid network login');
         con.close();
     }
 };
@@ -208,6 +210,9 @@ commands['001'] = async function(msg, con) {
     con.state.registrationLines.push([msg.command, msg.params.slice(1)]);
     await con.state.save();
 
+    // Start throttling messages sent to the server so we don't get flooded off
+    con.throttle(config.get('connections.write_throttle', 500));
+
     return false;
 };
 commands['002'] = async function(msg, con) {
@@ -215,7 +220,7 @@ commands['002'] = async function(msg, con) {
     await con.state.save();
     return false;
 };
-commands['004'] = async function(msg, con) {
+commands['003'] = async function(msg, con) {
     con.state.registrationLines.push([msg.command, msg.params.slice(1)]);
     await con.state.save();
     return false;
@@ -304,14 +309,17 @@ commands.JOIN = async function(msg, con) {
         await con.messages.storeMessage(msg, con, null);
     }
 
-    if (msg.nick.toLowerCase() !== con.state.nick.toLowerCase()) {
-        return;
-    }
-
     let chanName = msg.params[0];
-    let chan = con.state.getBuffer(chanName);
-    if (!chan) {
-        chan = con.state.addBuffer(chanName, con);
+    let chan = con.state.getBuffer(chanName) || con.state.addBuffer(chanName, con);
+
+    if (msg.nick.toLowerCase() !== con.state.nick.toLowerCase()) {
+        // Someone else joined the channel
+        chan.addUser(msg.nick, {
+            host: msg.hostname || undefined,
+            username: msg.ident || undefined,
+        });
+
+        return;
     }
 
     chan.joined = true;
@@ -323,32 +331,50 @@ commands.PART = async function(msg, con) {
         await con.messages.storeMessage(msg, con, null);
     }
 
-    if (msg.nick.toLowerCase() !== con.state.nick.toLowerCase()) {
-        return;
-    }
-
     let chanName = msg.params[0];
     let chan = con.state.getBuffer(chanName);
+
     if (!chan) {
+        // If we don't have this buffer the there's nothing to do
         return;
     }
 
-    chan.joined = false;
+    if (msg.nick.toLowerCase() !== con.state.nick.toLowerCase()) {
+        // Someone else left the channel
+        chan.removeUser(msg.nick);
+    } else {
+        chan.leave();
+    }
+
     await con.state.save();
 };
 
 commands.KICK = async function(msg, con) {
-    if (msg.params[1].toLowerCase() !== con.state.nick.toLowerCase()) {
-        return;
-    }
-
     let chanName = msg.params[0];
     let chan = con.state.getBuffer(chanName);
+    let kickedNick = msg.params[1];
+
     if (!chan) {
+        // If we don't have this buffer the there's nothing to do
         return;
     }
+    if (msg.params[1].toLowerCase() !== con.state.nick.toLowerCase()) {
+        // someone else was kicked
+        chan.removeUser(kickedNick);
+    } else {
+        chan.leave();
+    }
 
-    chan.joined = false;
+    await con.state.save();
+};
+
+commands.QUIT = async function(msg, con) {
+    let nick = msg.params[0];
+
+    for (let bufferName in con.state.buffers) {
+        con.state.buffers[bufferName].removeUser(nick);
+    }
+
     await con.state.save();
 };
 
@@ -393,6 +419,8 @@ commands.NICK = async function(msg, con) {
     }
 
     if (msg.nick.toLowerCase() !== con.state.nick.toLowerCase()) {
+        l.trace(`Someone changed their nick from ${msg.nick} to ${msg.params[0]}`);
+
         // Someone elses nick changed. Update any buffers we have to their new nick
         let buffer = con.state.getBuffer(msg.nick);
         if (!buffer) {
@@ -404,6 +432,8 @@ commands.NICK = async function(msg, con) {
         con.state.save();
 
     } else {
+        l.trace(`Our nick changed from ${msg.nick} to ${msg.params[0]}`);
+
         // Our nick changed, keep track of it
         con.state.nick = msg.params[0];
         con.state.save();
@@ -428,8 +458,76 @@ commands.NOTICE = async function(msg, con) {
     con.state.getOrAddBuffer(bufferNameIfPm(msg, con.state.nick, 0), con);
 };
 
+commands.ERROR = async function(msg, con) {
+    if (msg.params[0]) {
+        await con.state.tempSet('irc_error', msg.params[0]);
+    }
+};
+
+// RPL_NAMEREPLY
+commands['353'] = async function(msg, con) {
+    let bufferName = msg.params[2];
+    let buffer = con.state.getBuffer(bufferName) || con.state.addBuffer(bufferName, con);
+
+    if (!con.state.tempGet('receiving_names')) {
+        // This is the start of a new NAMES list. Clear out the old for this new one
+        await con.state.tempSet('receiving_names', true);
+        buffer.users = Object.create(null);
+    }
+
+    let ircdPrefixes = [];
+    // Parse (ov)@+ into [{mode:"o",symbol:"@"},{mode:"v",symbol:"+"}]
+    let matches = /\(([^)]*)\)(.*)/.exec(con.iSupportToken('PREFIX') || '');
+    if (matches && matches.length === 3) {
+        for (let j = 0; j < matches[2].length; j++) {
+            ircdPrefixes.push({
+                symbol: matches[2].charAt(j),
+                mode: matches[1].charAt(j)
+            });
+        }
+    }
+
+    let userMasks = msg.params[msg.params.length - 1].split(' ');
+    userMasks.forEach(mask => {
+        if (!mask) {
+            return;
+        }
+        var j = 0;
+        var modes = [];
+        var user = null;
+
+        // If we have prefixes, strip them from the nick and keep them separate
+        for (let j = 0; j < ircdPrefixes.length; j++) {
+            if (mask[0] === ircdPrefixes[j].symbol) {
+                modes.push(ircdPrefixes[j].symbol);
+                mask = mask.substring(1);
+            }
+        }
+
+        // We may have a full user mask if the userhost-in-names CAP is enabled
+        user = parseMask(mask);
+
+        buffer.addUser(user.nick, {
+            host: user.hostname || undefined,
+            username: user.ident || undefined,
+            prefixes: modes || undefined,
+        });
+    });
+
+    await con.state.save();
+};
+
+// RPL_ENDOFNAMES
+commands['366'] = async function(msg, con) {
+    await con.state.tempSet('receiving_names', null);
+    let buffer = con.state.getBuffer(msg.params[1]);
+    if (buffer) {
+        con.forEachClient(c => c.sendNames(buffer));
+    }
+};
+
 function bufferNameIfPm(message, nick, messageNickIdx) {
-    if (nick.toLowerCase() === message.params[messageNickIdx]) {
+    if (nick.toLowerCase() === (message.params[messageNickIdx] || '').toLowerCase()) {
         // It's a PM
         return message.nick;
     } else {

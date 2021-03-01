@@ -60,6 +60,18 @@ class ConnectionDictionary {
 
         return foundCon;
     }
+
+    // Find all outgoing connection instances for a user
+    findAllUsersClients(userId) {
+        let clients = [];
+        this.map.forEach((con) => {
+            if (con.state.type === TYPE_INCOMING && con.state.authUserId === userId) {
+                clients.push(con);
+            }
+        });
+
+        return clients;
+    }
 }
 
 ConnectionDictionary.TYPE_OUTGOING = TYPE_OUTGOING;

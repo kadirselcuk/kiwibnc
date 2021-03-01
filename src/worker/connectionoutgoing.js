@@ -48,6 +48,21 @@ class ConnectionOutgoing {
     async open() {
         await this.state.loadConnectionInfo();
 
+        let whitelist = config.get('connections.whitelist', []);
+        if (whitelist.length > 0 && !whitelist.includes(this.state.host.toLowerCase())) {
+            l.info('Attempted connection to forbidden network, ' + this.state.host);
+            this.forEachClient((client) => {
+                if (client.state.netRegistered) {
+                    client.writeStatus('This network is forbidden');
+                } else {
+                    client.write('ERROR :This network is forbidden\r\n');
+                    client.close();
+                }
+            });
+
+            return;
+        }
+
         let connection = {
             host: this.state.host,
             port: this.state.port,
@@ -58,6 +73,7 @@ class ConnectionOutgoing {
             family: undefined,
             // servername - force a specific TLS servername
             servername: undefined,
+            connectTimeout: 5000,
         };
 
         let hook = await hooks.emit('connection_to_open', {upstream: this, connection });
@@ -68,6 +84,10 @@ class ConnectionOutgoing {
         if (connection.host && connection.port) {
             this.queue.sendToSockets('connection.open', connection);
         }
+    }
+
+    throttle(interval) {
+        this.queue.sendToSockets('connection.throttle', {id: this.id, interval});
     }
 
     write(data) {
@@ -112,7 +132,8 @@ class ConnectionOutgoing {
 
             hook.event.clients.forEach(async client => {
                 // Keep track of any changes to our user in this client instance
-                if (message.command.toUpperCase() === 'NICK') {
+                let isUs = message.nick.toLowerCase() === client.state.nick.toLowerCase();
+                if (message.command.toUpperCase() === 'NICK' && isUs) {
                     client.state.nick = message.params[0];
                     await client.state.save();
                 }
@@ -132,6 +153,7 @@ class ConnectionOutgoing {
 
         // tempSet() saves the state
         await this.state.tempSet('reconnecting', null);
+        await this.state.tempSet('irc_error', null);
 
         hooks.emit('connection_open', {upstream: this});
 
@@ -175,20 +197,27 @@ class ConnectionOutgoing {
                 });
             }
 
-            channel.joined = false;
+            channel.leave();
         }
 
         await this.state.save();
 
         hooks.emit('connection_close', {upstream: this});
 
-        this.forEachClient((client) => {
+        this.forEachClient(async (client) => {
             let msg = 'Network disconnected';
             if (err && err.code) {
-                msg += ' ' + err.code;
+                msg += ` (${err.code})`;
             } else if (err && typeof err === 'string') {
-                msg += ' ' + err;
+                msg += ` (${err})`;
             }
+
+            // Include any ERROR lines the ircd sent down
+            let ircErr = await this.state.tempGet('irc_error');
+            if (ircErr) {
+                msg += ` (${ircErr})`;
+            }
+
             client.writeStatus(msg);
 
             if (!client.state.netRegistered) {

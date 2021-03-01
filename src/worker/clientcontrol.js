@@ -100,7 +100,7 @@ commands.LISTNETWORKS = async function(input, con, msg) {
     nets.forEach((net) => {
         let netCon = con.conDict.findUsersOutgoingConnection(
             con.state.authUserId,
-            con.state.authNetworkId,
+            net.id,
         );
         let activeNick = netCon ?
             netCon.state.nick :
@@ -108,10 +108,14 @@ commands.LISTNETWORKS = async function(input, con, msg) {
         let connected = netCon && netCon.state.connected ?
             'Yes' :
             'No';
+        let lastErr = netCon && netCon.state.tempGet('irc_error') ?
+            'Error: ' + netCon.state.tempGet('irc_error') :
+            undefined;
         let info = [
-            `Network: ${net.name} (${net.host}:${net.tls?'+':''}${net.port})`,
-            `Active nick: ${activeNick}`,
+            `${net.name} (${net.host}:${net.tls?'+':''}${net.port})`,
+            `Nick: ${activeNick}`,
             `Connected? ${connected}`,
+            lastErr,
         ];
         con.writeStatus(info.join('. '));
     });
@@ -325,7 +329,7 @@ commands.ADDNETWORK = {
         if (missingFields.length > 0) {
             con.writeStatus('Missing fields: ' + missingFields.join(', '));
             con.writeStatus(`Usage: addnetwork name=example server=irc.example.net port=6697 tls=yes nick=mynick`);
-            con.writeStatus(`Available fields: name, server, port, tls, tlsverify, nick, username, realname, password`);
+            con.writeStatus(`Available fields: name, server, port, tls, tlsverify, nick, username, realname, password, account, account_password`);
             return;
         }
 
@@ -336,14 +340,23 @@ commands.ADDNETWORK = {
             return;
         }
 
-        let network = await con.db.factories.Network();
-        network.user_id = con.state.authUserId;
-        for (let prop in toUpdate) {
-            network[prop] = toUpdate[prop];
-        }
-        await network.save();
+        try {
+            await con.userDb.addNetwork(con.state.authUserId, toUpdate);
+            con.writeStatus(`New network saved. You can now login using your_username/${toUpdate.name}:your_password`);
 
-        con.writeStatus(`New network saved. You can now login using your_username/${toUpdate.name}:your_password`);
+        } catch (err) {
+            if (err.code === 'max_networks') {
+                con.writeStatus(`No more networks can be added to this account`);
+                return;
+            } else if (err.code === 'missing_name') {
+                // Should never get here, but lets be safe
+                con.writeStatus(`A network name must be given`);
+                return;
+            } else {
+                l.error(err);
+                con.writeStatus(`An error occured trying to save your network`);
+            }
+        }
     },
 };
 
@@ -393,6 +406,46 @@ commands.SETPASS = async function(input, con, msg) {
     } catch (err) {
         l.error('Error setting new password:', err.message);
         con.writeStatus('There was an error changing your password');
+    }
+};
+
+commands.ADDTOKEN = async function(input, con, msg) {
+    try {
+        let token = await con.userDb.generateUserToken(con.state.authUserId);
+        con.writeStatus('Created new token for your account. You can use it in place of your password: ' + token);
+    } catch (err) {
+        l.error('Error creating user token:', err.message);
+        con.writeStatus('There was an error creating a new token for your account');
+    }
+};
+
+commands.LISTTOKENS = async function(input, con, msg) {
+    try {
+        let tokens = await con.userDb.getUserTokens(con.state.authUserId);
+        tokens.forEach(t => {
+            con.writeStatus('Token: ' + t.token);
+        });
+        con.writeStatus('No more tokens.');
+    } catch (err) {
+        l.error('Error reading user tokens:', err.message);
+        con.writeStatus('There was an error reading the tokens for your account');
+    }
+};
+
+commands.DELTOKEN = async function(input, con, msg) {
+    let parts = input.split(' ');
+    let token = parts[0] || '';
+    if (!token) {
+        con.writeStatus('Usage: deltoken <token>');
+        return false;
+    }
+
+    try {
+        await con.userDb.removeUserToken(con.state.authUserId, token);
+        con.writeStatus('Token deleted');
+    } catch (err) {
+        l.error('Error deleting user token:', err.message);
+        con.writeStatus('There was an error deleting the token from your account');
     }
 };
 

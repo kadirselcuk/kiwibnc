@@ -9,13 +9,15 @@ module.exports = class Database {
                 // config.path is legacy
 				filename: config.state || config.path || 'connections.db',
 			},
-			useNullAsDefault: true,
+            useNullAsDefault: true,
+            pool: { propagateCreateError: false },
         });
 
         let usersConStr = config.users || 'users.db';
         let usersDbCon = {
 			client: 'sqlite3',
-			connection: null,
+            connection: null,
+            pool: { propagateCreateError: false },
         };
         if (usersConStr.indexOf('postgres://') > -1) {
             // postgres://someuser:somepassword@somehost:381/somedatabase
@@ -23,7 +25,7 @@ module.exports = class Database {
             usersDbCon.connection = usersConStr;
             let searchPathM = usersConStr.match(/searchPath=([^&]+)/);
             if (searchPathM) {
-                usersDbCon.searchPath = searchPathM[1];
+                usersDbCon.searchPath = searchPathM[1].split(',');
             }
         } else if (usersConStr.indexOf('mysql://') > -1) {
             // mysql://user:password@127.0.0.1:3306/database

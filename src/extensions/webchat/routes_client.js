@@ -1,21 +1,13 @@
 const fs = require('fs-extra');
 const path = require('path');
-const { parseBindString } = require('../../../libs/helpers');
+const { parseBindString } = require('../../libs/helpers');
 
 module.exports = function(app) {
     let router = app.webserver.router;
 
-    // Get our listener port so that we can automatically put it into the kiwiirc config on the fly
-    let port = 80;
-    let binds = app.conf.get('listeners.bind', []);
-    let bind = parseBindString(binds[0] || '');
-    if (bind && bind.port) {
-        port = parseInt(bind.port, 10);
-    }
-
     let publicPath = app.conf.relativePath(app.conf.get('webserver.public_dir'));
 
-    router.get('kiwi.config', '/kiwibnc_plugin.html', async (ctx, next) => {
+    router.get('kiwi.bnc_plugin', '/kiwibnc_plugin.html', async (ctx, next) => {
         ctx.body = await fs.readFile(
             path.join(__dirname, 'kiwibnc_plugin.html'),
             { encoding: 'utf8' },
@@ -34,8 +26,9 @@ module.exports = function(app) {
 
         config.startupOptions = {
             ...config.startupOptions,
-            port: port,
+            port: '{{port}}',
             server: '{{hostname}}',
+            direct_path: '/',
             tls: false,
             direct: true,
             channel: '',
@@ -48,7 +41,8 @@ module.exports = function(app) {
         config.plugins = config.plugins || [];
         config.plugins.push({
             name: 'kiwibnc',
-            url: '/kiwibnc_plugin.html',
+            url: router.url('kiwi.bnc_plugin', {}),
+            basePath: ctx.basePath,
         });
 
         let extraConf = app.conf.get('webchat');

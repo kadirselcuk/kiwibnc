@@ -332,6 +332,15 @@ class SqliteMessageStore {
         let prefix = clientCon ? clientCon.state.nick : message.nick;
         let time = new Date(message.tags.time || isoTime());
 
+        // Ignore CTCP request/responses
+        if (
+            (message.command === 'PRIVMSG' || message.command === 'NOTICE') &&
+            message.params[1] && message.params[1][0] === '\x01'
+        ) {
+            this.storeQueueLooping = false;
+            return;
+        }
+
         if (message.command === 'PRIVMSG') {
             type = MSG_TYPE_PRIVMSG;
             bufferName = bufferNameIfPm(message, conState.nick, 0);
@@ -390,8 +399,11 @@ class SqliteMessageStore {
 module.exports = SqliteMessageStore;
 
 function bufferNameIfPm(message, nick, messageNickIdx) {
-    if (nick.toLowerCase() === message.params[messageNickIdx]) {
-        // It's a PM
+    if (!message.nick) {
+        // A client sent a message
+        return message.params[messageNickIdx];
+    } else if (nick.toLowerCase() === message.params[messageNickIdx].toLowerCase()) {
+        // We are the target so it's a PM
         return message.nick;
     } else {
         return message.params[messageNickIdx];

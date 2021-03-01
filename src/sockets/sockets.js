@@ -31,6 +31,22 @@ async function run() {
         }
     });
 
+    app.queue.on('connection.throttle', async (event) => {
+        let con = cons.get(event.id);
+        if (!con) {
+            l.warn('Couldn\'t find connection to throttle.', event.id);
+            return;
+        }
+
+        let newInterval = parseInt(event.interval, 10);
+        if (isNaN(newInterval)) {
+            l.warn('Invalid interval for throttle', newInterval);
+            return;
+        }
+
+        con.throttledWrite.interval = newInterval;
+    });
+
     app.queue.on('connection.open', async (event) => {
         let con = cons.get(event.id);
         if (con && con.connected) {
@@ -63,6 +79,7 @@ async function run() {
             family: event.family,
             servername: event.servername,
             tlsverify: event.tlsverify,
+            connectTimeout: event.connectTimeout || 5000,
         });
     });
 
@@ -91,7 +108,7 @@ async function run() {
 
         let srv = null;
         if (!event.type || event.type === 'tcp' || event.type === 'ws') {
-            srv = new SocketServer(event.id, app.queue);
+            srv = new SocketServer(event.id, app.queue, app.conf);
         } else {
             l.error('Invalid server type for connection listen, ' + event.type);
             return;
