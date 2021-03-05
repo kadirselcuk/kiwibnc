@@ -27,7 +27,7 @@
     "parse-duration": "^0.4.4",
     "pg": "^8.5.1",
     "readline-sync": "^1.4.10",
-    "request-promise": "^4.2.4",
+    "request-promise": "^4.2.6",
     "rpc-over-ipc": "^1.0.0",
     "sqlite3": "^4.2.0",
     "strftime": "^0.10.0",
