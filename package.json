@@ -33,7 +33,7 @@
     "strftime": "^0.10.0",
     "toml": "^2.3.6",
     "unzipper": "^0.10.11",
-    "uuid": "^3.3.2",
+    "uuid": "^3.4.0",
     "ws": "^7.4.3"
   },
   "devDependencies": {
